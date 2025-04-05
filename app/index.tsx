@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Text, View, TextInput, Button, FlatList, StyleSheet, NativeModules, Alert } from 'react-native';
+import { Text, View, TextInput, Button, FlatList, StyleSheet, NativeModules, Alert, SafeAreaView } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
-
 
 // Define una interfaz para nuestra estructura de elemento de texto
 interface TextItem {
@@ -10,10 +9,21 @@ interface TextItem {
   text: string;
 }
 
+// Interfaz para la información del widget
+interface WidgetInfo {
+  widgetCount: number;
+  widgetIds: string;
+  savedTextsRaw: string;
+  parsedTexts: string;
+  nextUpdateTime: string;
+}
+
 export default function Index() {
   // Estado para el input de texto y la lista de textos guardados con tipado adecuado
   const [inputText, setInputText] = useState<string>('');
   const [savedTexts, setSavedTexts] = useState<TextItem[]>([]);
+  const [widgetInfo, setWidgetInfo] = useState<WidgetInfo | null>(null);
+  const [lastUpdateTime, setLastUpdateTime] = useState<string>('Nunca');
 
   // Cargar textos guardados desde AsyncStorage cuando el componente se monta
   useEffect(() => {
@@ -26,6 +36,7 @@ export default function Index() {
       const storedTexts = await AsyncStorage.getItem('savedTexts');
       if (storedTexts !== null) {
         setSavedTexts(JSON.parse(storedTexts));
+        console.log('Textos cargados desde AsyncStorage:', storedTexts);
       }
     } catch (error) {
       console.error('Error loading saved texts:', error);
@@ -35,18 +46,23 @@ export default function Index() {
   // Función para guardar datos accesibles por el widget
   const saveTextForWidget = async (texts: TextItem[]) => {
     try {
+      console.log('Guardando textos para el widget:', JSON.stringify(texts));
+      
       // Guardar en AsyncStorage normal
       await AsyncStorage.setItem('savedTexts', JSON.stringify(texts));
       
       // También guardar en SharedPreferences para el widget
       if (Platform.OS === 'android') {
         // Para Android
-        const { NativeModules } = require('react-native');
         if (NativeModules.SharedStorage) {
           NativeModules.SharedStorage.set(
             "savedTexts",
             JSON.stringify(texts)
           );
+          console.log('Textos guardados en SharedStorage para Android');
+          setLastUpdateTime(new Date().toLocaleTimeString());
+        } else {
+          console.warn('SharedStorage no disponible en Android');
         }
       } else if (Platform.OS === 'ios') {
         // Para iOS
@@ -55,6 +71,9 @@ export default function Index() {
             "savedTexts",
             JSON.stringify(texts)
           );
+          console.log('Textos guardados en SharedStorage para iOS');
+        } else {
+          console.warn('SharedStorage no disponible en iOS');
         }
       }
     } catch (error) {
@@ -78,6 +97,8 @@ export default function Index() {
       // Guardar en AsyncStorage y para el widget
       try {
         await saveTextForWidget(updatedTexts);
+        // Actualizamos info del widget después de guardar
+        checkWidgetStatus();
       } catch (error) {
         console.error('Error saving text:', error);
       }
@@ -103,6 +124,8 @@ export default function Index() {
             setSavedTexts([]);
             try {
               await saveTextForWidget([]);
+              // Actualizamos info del widget después de borrar
+              checkWidgetStatus();
             } catch (error) {
               console.error('Error clearing texts:', error);
             }
@@ -112,6 +135,41 @@ export default function Index() {
       ]
     );
   };
+  
+  // Función para verificar el estado del widget
+  const checkWidgetStatus = () => {
+    if (Platform.OS === 'android' && NativeModules.SharedStorage && NativeModules.SharedStorage.getWidgetInfo) {
+      NativeModules.SharedStorage.getWidgetInfo((error: string, info: WidgetInfo) => {
+        if (error) {
+          console.error('Error getting widget info:', error);
+          Alert.alert('Error', 'No se pudo obtener información del widget: ' + error);
+        } else {
+          console.log('Widget info:', info);
+          setWidgetInfo(info);
+        }
+      });
+    } else {
+      console.log('getWidgetInfo no está disponible');
+      Alert.alert('No disponible', 'La información del widget solo está disponible en Android');
+    }
+  };
+  
+  // Función para forzar la actualización del widget
+  const forceWidgetUpdate = async () => {
+    if (Platform.OS === 'android' && NativeModules.SharedStorage) {
+      try {
+        // Volvemos a guardar los datos actuales para forzar una actualización
+        await saveTextForWidget(savedTexts);
+        setLastUpdateTime(new Date().toLocaleTimeString());
+        Alert.alert('Éxito', 'Actualización del widget solicitada');
+        // Comprobamos el estado después de la actualización
+        setTimeout(checkWidgetStatus, 500);
+      } catch (error) {
+        console.error('Error updating widget:', error);
+        Alert.alert('Error', 'No se pudo actualizar el widget: ' + error);
+      }
+    }
+  };
 
   // Función para renderizar cada elemento en la lista con tipado adecuado
   const renderItem = ({ item }: { item: TextItem }) => (
@@ -120,8 +178,10 @@ export default function Index() {
     </View>
   );
 
+  // Renderizar el componente principal
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container}>
+      {/* Input y botón para agregar texto */}
       <View style={styles.inputContainer}>
         <TextInput
           style={styles.input}
@@ -132,6 +192,7 @@ export default function Index() {
         <Button title="Guardar" onPress={saveText} />
       </View>
       
+      {/* Encabezado de la lista con botón de borrar */}
       <View style={styles.headerContainer}>
         <Text style={styles.listHeader}>Textos guardados:</Text>
         <Button 
@@ -141,13 +202,52 @@ export default function Index() {
         />
       </View>
 
-      <FlatList
-        data={savedTexts}
-        renderItem={renderItem}
-        keyExtractor={(item: TextItem) => item.id}
-        style={styles.list}
-      />
-    </View>
+      {/* Lista de textos guardados */}
+      <View style={styles.listContainer}>
+        <FlatList
+          data={savedTexts}
+          renderItem={renderItem}
+          keyExtractor={(item: TextItem) => item.id}
+          style={styles.list}
+          ListEmptyComponent={<Text style={styles.emptyList}>No hay textos guardados</Text>}
+        />
+      </View>
+      
+      {/* Sección de depuración del Widget */}
+      <View style={styles.debugSection}>
+        <Text style={styles.debugHeader}>Depuración del Widget</Text>
+        <Text style={styles.debugText}>Última actualización: {lastUpdateTime}</Text>
+        
+        <View style={styles.buttonRow}>
+          <View style={styles.button}>
+            <Button 
+              title="Verificar Estado" 
+              onPress={checkWidgetStatus} 
+              color="#007AFF"
+            />
+          </View>
+          <View style={styles.button}>
+            <Button 
+              title="Forzar Actualización" 
+              onPress={forceWidgetUpdate} 
+              color="#4CD964"
+            />
+          </View>
+        </View>
+        
+        {widgetInfo && (
+          <View style={styles.widgetInfo}>
+            <Text style={styles.infoTitle}>Información del Widget:</Text>
+            <Text>Cantidad de widgets: {widgetInfo.widgetCount}</Text>
+            <Text>IDs de widgets: {widgetInfo.widgetIds || 'Ninguno'}</Text>
+            <Text>Próxima actualización: {widgetInfo.nextUpdateTime}</Text>
+            <Text style={styles.infoTitle}>Textos guardados:</Text>
+            <Text>{widgetInfo.parsedTexts}</Text>
+            <Text style={styles.rawJson}>Datos raw: {widgetInfo.savedTextsRaw}</Text>
+          </View>
+        )}
+      </View>
+    </SafeAreaView>
   );
 }
 
@@ -158,7 +258,7 @@ const styles = StyleSheet.create({
   },
   inputContainer: {
     flexDirection: 'row',
-    marginBottom: 20,
+    marginBottom: 10,
   },
   input: {
     flex: 1,
@@ -172,18 +272,66 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: 5,
   },
   listHeader: {
     fontSize: 18,
     fontWeight: 'bold',
   },
+  listContainer: {
+    height: 200, // Altura fija para la lista
+    marginBottom: 10,
+  },
   list: {
     flex: 1,
+  },
+  emptyList: {
+    textAlign: 'center',
+    marginTop: 20,
+    color: '#888',
   },
   item: {
     padding: 15,
     borderBottomWidth: 1,
     borderBottomColor: '#eee',
+  },
+  debugSection: {
+    marginTop: 10,
+    padding: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#ccc',
+  },
+  debugHeader: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 10,
+  },
+  debugText: {
+    marginBottom: 10,
+  },
+  buttonRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 15,
+  },
+  button: {
+    flex: 1,
+    marginHorizontal: 5,
+  },
+  widgetInfo: {
+    backgroundColor: '#f0f0f0',
+    padding: 15,
+    borderRadius: 8,
+    marginTop: 10,
+  },
+  infoTitle: {
+    fontWeight: 'bold',
+    marginTop: 10,
+    marginBottom: 5,
+  },
+  rawJson: {
+    fontSize: 12,
+    color: '#666',
+    marginTop: 10,
   },
 });
